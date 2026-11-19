@@ -26,6 +26,7 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
+	"github.com/misakano7545/workbuddy2api-panel/internal/codearts"
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
@@ -95,6 +96,9 @@ type Config struct {
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
 	ModelFallback func() map[string]string
+
+	// CodeArts 华为云 CodeArts 第三出口（可选；nil = 未接入）。
+	CodeArts *codearts.Manager
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -343,13 +347,28 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/update/install", p.installUpdate)
 	// 更新通道探测（issue #198）：分别探版本元数据与资产下载两条路。
 	p.mux.HandleFunc("POST /panel/api/update/probe", p.probeUpdate)
+
+	// CodeArts 第三出口：独立设置页 + 管理 API。设置与账号数据存放在
+	// <data>/codearts/，不混入 WorkBuddy 的 auths/ 目录。
+	p.mux.HandleFunc("GET /panel/codearts", p.codeartsPage)
+	p.mux.HandleFunc("GET /panel/codearts.js", p.codeartsScript)
+	p.mux.HandleFunc("GET /panel/api/codearts", p.codeartsStatus)
+	p.mux.HandleFunc("POST /panel/api/codearts/config", p.codeartsConfig)
+	p.mux.HandleFunc("POST /panel/api/codearts/oauth/start", p.codeartsOAuthStart)
+	p.mux.HandleFunc("GET /panel/api/codearts/oauth/poll", p.codeartsOAuthPoll)
+	p.mux.HandleFunc("POST /panel/api/codearts/models/refresh", p.codeartsRefreshModels)
+	p.mux.HandleFunc("POST /panel/api/codearts/accounts/{uid}/enable", p.codeartsAccountEnable)
+	p.mux.HandleFunc("POST /panel/api/codearts/accounts/{uid}/disable", p.codeartsAccountDisable)
+	p.mux.HandleFunc("DELETE /panel/api/codearts/accounts/{uid}", p.codeartsAccountRemove)
 }
 
 // publicPanelPaths 免鉴权的精确路径：静态页面与脚本本身不含秘密，其余一律要密钥。
 var publicPanelPaths = map[string]struct{}{
-	"/panel/":         {},
-	"/panel/theme.js": {},
-	"/panel/app.js":   {},
+	"/panel/":            {},
+	"/panel/theme.js":    {},
+	"/panel/app.js":      {},
+	"/panel/codearts":    {},
+	"/panel/codearts.js": {},
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

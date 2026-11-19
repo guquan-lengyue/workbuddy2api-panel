@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/codearts"
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
@@ -140,6 +141,10 @@ type Config struct {
 	// RestrictionHold 11140 风控连坐的全池暂停时长（upstream.restriction_hold_seconds，
 	// 默认 1800s；0 = 只保留「命中即停手」）。见 restrict.go。启动时读取。
 	RestrictionHold time.Duration
+
+	// CodeArts 华为云 CodeArts（盘古助手/码道）第三上游。nil = 未接入。
+	// 路由由 model 的 codearts: 前缀或 ?realm=codearts 触发。
+	CodeArts *codearts.Manager
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -336,6 +341,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 华为云 CodeArts OAuth 回调：浏览器直接跳转到本机，不能要求网关 Bearer。
+	// 回调里只处理已登记的授权会话，未知/过期会话一律拒绝。
+	h.mux.HandleFunc("GET /oauth/callback", h.codeartsOAuthCallback)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
@@ -584,6 +592,16 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	// CodeArts 目录：与 WorkBuddy 的 cn:/global: 名单分开请求。按文档使用
+	// /v1/models?realm=codearts 获取裸模型 ID；通用 /v1/models 里则以
+	// codearts: 前缀单列，避免与 WorkBuddy 同名模型冲突。
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("realm")), "codearts") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list",
+			"data":   h.codeartsModelEntries(false),
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   h.modelList(),
@@ -838,6 +856,9 @@ func (h *Handler) modelList() []map[string]any {
 	// 出图模型（目录里被 tag 剔掉的 text-to-image / image-to-image）：对话列表照旧不含它们，
 	// 这里以 image_generation=true 单列——客户端据此发现可用的出图模型名，不会误发对话。
 	out = append(out, h.generationModelEntries()...)
+	// CodeArts 第三出口：通用列表里以 codearts: 前缀单列，客户端不会把同名模型
+	// 误发到 WorkBuddy 上游；专用目录走 /v1/models?realm=codearts。
+	out = append(out, h.codeartsModelEntries(true)...)
 	return out
 }
 
@@ -1023,6 +1044,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+	// CodeArts 第三上游：请求以 model 前缀 codearts: 或 ?realm=codearts 选择。
+	// 在 WorkBuddy 的 alias / hidden / 选号逻辑之前分流，避免把 CodeArts 模型名
+	// 当成 WorkBuddy 裸名去查池。
+	if h.isCodeArtsRequest(r, peek.Model) {
+		h.codeartsChat(w, r, body, peek.Model, peek.Stream)
+		return
+	}
+
 	// 会话上下文（面板「请求事件日志」展开看）：/messages 与 /responses 都先转成
 	// chat 体再进来，所以这一处就覆盖三条入站协议。开关关时为零值 nil，不落盘。
 	if h.loadLive().RecordContext {

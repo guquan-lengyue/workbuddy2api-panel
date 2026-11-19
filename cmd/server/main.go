@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +26,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/alert"
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
+	"github.com/misakano7545/workbuddy2api-panel/internal/codearts"
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/panel"
@@ -84,6 +86,18 @@ func stateSibling(stateFile, name string) string {
 		return name
 	}
 	return filepath.Join(dir, name)
+}
+
+// listenPort extracts the numeric port from config.listen for the CodeArts
+// OAuth redirect URI. Unknown/empty forms return 0 and the manager falls back
+// to 7863.
+func listenPort(addr string) int {
+	_, portText, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return 0
+	}
+	port, _ := strconv.Atoi(portText)
+	return port
 }
 
 func main() {
@@ -463,6 +477,16 @@ func main() {
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
 	updateManager := updater.New(appVersion, appRepository, *cfgPath, updateSettingsFrom(cfg))
+	// CodeArts 第三出口：数据目录与 state 文件同目录的 codearts/，设置、账号
+	// 与 state 均自包含，不混入 WorkBuddy 的 auths/。
+	codeartsMgr := codearts.NewManager(stateSibling(cfg.StateFile, "codearts"))
+	if port := listenPort(cfg.Listen); port > 0 {
+		codeartsMgr.SetCallbackPort(port)
+	}
+	defer codeartsMgr.Close()
+	if codeartsMgr.Enabled() {
+		log.Printf("[codearts] 已启用（%s）", stateSibling(cfg.StateFile, "codearts"))
+	}
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -471,6 +495,8 @@ func main() {
 		RequestLog: requestLog,
 		Upstream:   up,
 		Scheduler:  sch,
+		// CodeArts 第三出口（设置页 /panel/codearts）。
+		CodeArts: codeartsMgr,
 		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		// 余额趋势采样记录器：nil 时该视图返回 501。
@@ -564,6 +590,7 @@ func main() {
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
 		Panel:        pn,
+		CodeArts:     codeartsMgr,
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,

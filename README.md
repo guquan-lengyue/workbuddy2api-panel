@@ -538,3 +538,30 @@ DMG 未公证，首次打开需要右键 →「打开」。
 | **嵌入端点（实验）** | `POST /v1/embeddings`：OpenAI 兼容嵌入，默认关闭（`features.embeddings_enabled`）。上游 `POST /v2/embeddings` 与对话是两套注册表，实测只有 `bge-m3`（1024 维）；`11351` 映射成 404 `model_not_found`，回程补 `object`/`index`，条数不符 502。关闭时回 403 `embeddings_disabled` |
 | **补签卡每轮上限** | `schedule.makeup_cards_per_round`（默认 `0` = 不限，保持既有行为）。补签会改账号历史，保守部署设 `1` 即每轮只补一张，剩余漏签下一轮继续；面板保存后热生效 |
 
+## CodeArts 接入（第三上游）
+
+华为云 CodeArts（盘古助手 / 码道）作为 CodeArts 出口接入，协议参考本地
+`docs/CodeArts 接入与运行流程.md`（该目录被 `.gitignore` 排除，仅作本机参考）。CodeArts 默认关闭，
+设置、账号与运行状态都放在 `state_file` 同目录的 `codearts/` 下，不混入 WorkBuddy 的 `auths/`：
+
+- `codearts/config.json`：出口开关、超时、模型缓存、单账号并发、忙时排队等；
+- `codearts/codearts-<uid>.json`：OAuth 授权后的 STS `AK/SK/security_token`、refresh token、DPoP 私钥；
+- `codearts/state.json`：停用、冷却、错误计数、备注等运行状态。
+
+入口：
+
+- 面板：`http://127.0.0.1:<listen>/panel/codearts`（左侧导航「CodeArts」），可启用出口、
+  发起 OAuth、查看/停用/删除账号、刷新模型目录；
+- 模型目录：`GET /v1/models?realm=codearts` 返回裸模型 ID；通用 `/v1/models` 以
+  `codearts:` 前缀单列，避免与 WorkBuddy 同名模型冲突；
+- 聊天：`POST /v1/chat/completions`，模型用 `codearts:<模型ID>`，或 `?realm=codearts`
+  加裸模型 ID。
+
+实现覆盖：OAuth 2.0 + PKCE + DPoP（P-256/ES256）、STS 临时凭证续期、华为云
+`SDK-HMAC-SHA256` 签名、agent-center / builtin / 限时福利三路模型发现与合并、SSE → OpenAI
+chunk 转换、账号轮转/并发/冷却、非流式聚合、面板设置与管理 API。密码学与请求签名有
+Go 对照向量测试；实际链路仍需要真实 CodeArts 账号做端到端冒烟。
+
+首版暂未实现：每日积分签到（`credits_auto_claim` 仅保留配置位）、限时福利领取的完整
+校验、按 Key 的出口/模型/账号绑定（本仓只有一把管理员 `api_key`，不做多 Key 分发）。
+
